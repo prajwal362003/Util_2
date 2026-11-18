@@ -1,0 +1,174 @@
+package com.sbi.controller;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.FileTime;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Controller;
+
+import com.sbi.configuration.ExtractProperties;
+import com.sbi.constants.FilePaths;
+import com.sbi.service.ZipValidationService;
+import com.sbi.utils.DocLogger;
+
+
+@Controller
+public class DocumentValidationController {
+
+	private static final Logger logger = (Logger) LogManager.getLogger(DocumentValidationController.class);
+	//Start of CR 26060165
+	private static final int fileArrayLength=Integer.parseInt(ExtractProperties.getInstance().getProperty("file.length"));
+	private static final int timeInMillis =Integer.parseInt(ExtractProperties.getInstance().getProperty("time.to.process"));
+	//End of CR 26060165
+	
+	@Autowired
+	ZipValidationService zipValidationService;
+
+	public void zipExtract() {
+
+		logger.info("Inside MAIN of Utility....create doc file..............");
+
+		int processedLcpc = 0;
+		String lcpcName = "";
+		String lcpc_names[] = ExtractProperties.getInstance().getProperty("LCPC_NAME").split(",");
+		logger.info("lcpc_names..........." + lcpc_names.length);
+
+		try {
+
+				logger.info("Inside while");
+				for (String lcpcFold : lcpc_names) {
+
+					File lcpcfold = new File(FilePaths.inputFolder + "/" + lcpcFold);
+					logger.info("File path :  "+lcpcfold.getAbsolutePath());
+					processedLcpc++;
+					logger.info("c before iterating " + processedLcpc);
+					lcpcName = lcpcfold.getName();
+					logger.info("lcpcName " + lcpcName);
+					//Prod_fix
+					//lcpcName = lcpcName.split("_")[0]; 
+					lcpcName = lcpcName.split("_")[1]; 
+					//Prod_fix
+					String ZipFileList[] = lcpcfold.list();
+					if (ZipFileList.length == 0) {
+						logger.info(lcpcFold + " Folder Empty");
+						System.out.println(lcpcFold + " Folder is Empty");
+						continue;
+
+					} else {
+						logger.info("Files found "+ZipFileList.length);
+						
+						for (String ZipFile : ZipFileList) {
+							File Zipfile = new File(lcpcfold + "/" + ZipFile);
+							
+							if(!fileCanProcess(Paths.get(lcpcfold + "/" + ZipFile))) {
+								logger.info("File is too - fresh, might be still downloading");
+								continue;
+							}
+							
+							String s1[] = Zipfile.getName().split("\\_");
+							System.out.println(" Zip file : "+s1.length);
+						
+							if (Zipfile.isFile() && Zipfile.getName().contains("REKYC_SCANNED_DOCS")
+									&& Zipfile.getName().contains("zip")
+									&& s1.length == fileArrayLength) {
+								
+								logger.info("perfios file from LCPC");
+								String extractMsg=zipValidationService.extractZipFile(Zipfile,  lcpcName);
+								logger.info("Zip File extractMsg  "+extractMsg);
+								if(!"SUCCESS".equalsIgnoreCase(extractMsg)) logger.info(" failure ____________________________________ ");
+
+								zipValidationService.iterateFolders(Zipfile,lcpcName);
+
+							} else if(Zipfile.getName().contains(".sftp-download-manifest.properties")) {
+								logger.info("skip manifest");
+								continue;
+							 
+							
+							}else{
+								//PROD-FIX
+								logger.info("Invalid ReKYC file from LCPC");
+							    DocLogger.docWriter(Zipfile.getName(), "Invalid file from LCPC", "NA", lcpcName);
+
+							    File backupDir = new File(FilePaths.InvalidZipBkpPath + File.separator + lcpcName);
+							    logger.info("backup Dir "+backupDir);
+							    if (!backupDir.exists()) {
+							    	backupDir.mkdirs();
+							    }
+							    File backupFile = new File(backupDir, Zipfile.getName());
+							    try {
+							        Files.copy(Zipfile.toPath(), backupFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+							    } catch (Exception e) {
+							        logger.error(e);
+							    }
+							    
+							    if (Zipfile.exists()) Zipfile.delete();
+							    System.out.println("\nInvalid file from LCPC moved to backup: " + Zipfile.getName());
+							    continue;
+							}
+							
+							/*else {
+								logger.info("Invalid ReKYC file from LCPC");
+								File Fold = new File(FilePaths.ExceptionFolder + File.separator + lcpcName + File.separator + Zipfile.getName());
+								DocLogger.docWriter(Zipfile.getName(), "Invalid file from LCPC", "NA", lcpcName);
+								if (Fold.exists()) {
+									Fold.delete();
+								}
+								try {
+									Files.move(Zipfile.toPath(), Fold.toPath(), StandardCopyOption.REPLACE_EXISTING);
+									System.out.println("\n \n \n    Invalid file from LCPC       \n\n\n"+Zipfile.getName());
+								
+								} catch (Exception e) {
+								// Start of CR 26060165
+									logger.error(e);
+								// End of CR 26060165
+								}
+								continue;
+							}*/
+						}
+					}
+					logger.info(" after iterating " + processedLcpc + " and " + lcpc_names.length);
+					if (processedLcpc == lcpc_names.length) {
+						logger.info(processedLcpc);
+						System.out.println("Iterated through all "+processedLcpc+" folders");
+						System.out.println("____________________________________________________________Successfully End_________________________________________________________________");
+						//System.exit(0);
+					}
+				}
+			//}
+		}catch(Exception e) {
+			logger.error(e);
+		}
+		System.out.println("____________________________________________________________End_________________________________________________________________");
+	}
+	private boolean fileCanProcess(Path file) {
+		long now = System.currentTimeMillis();
+		long stabilityMillis = TimeUnit.SECONDS.toMillis(timeInMillis);
+		logger.info("path >>  " + file);
+		try{
+			BasicFileAttributes attrs = Files.readAttributes(file, BasicFileAttributes.class);
+			long diff=now-attrs.lastModifiedTime().toMillis();
+			logger.info("diff  " + diff+" , stabilityMillis "+stabilityMillis);
+			return diff>=stabilityMillis;
+		} catch (Exception e) {
+			// throw new UncheckedIOException("Failed to list input directory " + path, e);
+			logger.error("e.getMessage() >>  " + e.getMessage());
+		}
+		return true;
+	}
+}
