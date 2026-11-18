@@ -1,0 +1,419 @@
+package com.sbi.serviceImpl;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
+// Start of CR 26060165
+import java.util.HashSet;
+// End of CR 26060165
+import java.util.List;
+import java.util.Map;
+// Start of CR 26060165
+import java.util.Set;
+import java.util.stream.IntStream;
+// End of CR 26060165
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.Logger;
+import org.apache.tika.Tika;
+import org.apache.tika.mime.MimeType;
+import org.apache.tika.mime.MimeTypeException;
+import org.apache.tika.mime.MimeTypes;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+// Start of CR 26060165
+import com.sbi.configuration.ExtractProperties;
+// End of CR 26060165
+import com.sbi.constants.FilePaths;
+import com.sbi.constants.LcpcResponses;
+import com.sbi.dao.EnquiryDAO;
+import com.sbi.dto.FileValidationData;
+import com.sbi.service.FileService;
+
+import com.sbi.dto.FileParameters;
+
+
+@Service
+public class FileServiceImpl implements FileService {
+	
+	@Autowired
+	EnquiryDAO enquiryDAO;
+	
+	private static final Logger logger = (Logger) LogManager.getLogger(FileServiceImpl.class);
+	private static Tika tika = new Tika();
+	// Start of CR 26060165
+	private static List<String> listofIds=Arrays.asList(ExtractProperties.getInstance().getProperty("Document.Id.Types").split(","));
+	// End of CR 26060165
+
+
+	@Override
+	public FileValidationData fileValidations(File file, String lcpcname, String Cifnumber, 
+			String AccNumber, Map<String, FileParameters> criteriaMap) throws IOException {
+		int POA = 0;
+		int POI = 0;
+		int Others = 0;
+		int photo = 0;
+		int sign = 0;
+		int KYC = 0;
+		int kycupdateForm=0;
+		
+		// New Change
+		int pan = 0;
+		
+		FileValidationData fileValidation = new FileValidationData();
+		String validationMessage="";
+		// Start of CR 26060165
+		Set<String> recievedIdList = new HashSet<>();
+		// End of CR 26060165
+		try {
+
+			File files_array[] = file.listFiles();
+
+			if (files_array == null) {
+			    // listFiles() returns NULL when there's a permission denied or I/O error
+			    logger.error("PERMISSION DENIED or I/O error accessing folder: " + file.getAbsolutePath());
+			    logger.error("canRead=" + file.canRead() + ", canExecute=" + file.canExecute() + ", exists=" + file.exists());
+			    fileValidation.setValidationMessage("PERMISSION_DENIED_OR_IO_ERROR");
+			    return fileValidation;
+			}
+
+			if (files_array.length == 0) {
+			    // This means the folder IS accessible but is genuinely EMPTY
+			    logger.error("Folder exists and is readable but EMPTY: " + file.getAbsolutePath());
+			    fileValidation.setValidationMessage("NO DOCUMENTS FOUND");
+			    return fileValidation;
+			}
+			
+			logger.info("List of files to validate : "+files_array.length);
+			for (File f2 : files_array) {
+				logger.info("Document name : "+f2.getName());
+				String fileName = f2.getName().toUpperCase(); 
+				long fileSize = f2.length();
+				logger.info("fileSize in Bytes : "+fileSize);
+				//	String idTyp="";
+
+				//Map<String,FileParameters> validationMap = new HashMap<>();
+				String[] fileNameArray = fileName.split("_");
+				logger.info("File name Keyword : "+fileNameArray[1]);
+
+				// Start of CR 26060165
+				if(fileNameArray.length==4) {
+					if(!verifyDocIdNumber(fileNameArray[3])) {
+						logger.info("WRONG_NAMING_OF_DOCUMENTS");
+						validationMessage= "WRONG_NAMING_OF_"+fileNameArray[1];
+						fileValidation.setValidationMessage(validationMessage);
+						return fileValidation;
+					}
+					logger.info("found ID in a list");
+					if(recievedIdList.contains(fileNameArray[3])) {
+						logger.info("WRONG_NAMING_OF_DOCUMENTS "+fileName);
+						validationMessage= "WRONG_NAMING_OF_"+fileNameArray[1];
+						fileValidation.setValidationMessage(validationMessage);
+						return fileValidation;
+					}else {
+						recievedIdList.add(fileNameArray[3]);
+					}					
+				}
+
+				logger.info("Cif in the documnet : "+fileNameArray[0]);
+				if(!fileNameArray[0].equalsIgnoreCase(Cifnumber)) {//UAT_fix
+					logger.info("WRONG_NAMING_OF_DOCUMENTS "+fileName);
+					validationMessage= "WRONG_NAMING_OF_DOCUMENTS";
+					fileValidation.setValidationMessage(validationMessage);
+					return fileValidation;
+				}
+				// End of CR 26060165
+
+				String[] splitArray=fileNameArray[1].split("\\.");
+				String documentType= splitArray.length>1? splitArray[0]:fileNameArray[1];
+				logger.info("documentType : "+documentType);
+				if(criteriaMap.containsKey(documentType)) {
+
+					FileParameters fileParameterBean = criteriaMap.get(documentType);
+
+					logger.info("Current documents validations : "+fileParameterBean.toString());
+					if(!validateExtension(fileParameterBean.getExtension(),f2.getName())) {
+						validationMessage= "INVALID FILE TYPE "+documentType;
+						fileValidation.setValidationMessage(validationMessage);
+						return fileValidation;
+					}
+
+					String mimeType;
+					//= tika.detect(new FileInputStream(f2));
+					try(FileInputStream fis = new FileInputStream(f2)){
+						mimeType=tika.detect(fis);
+					}
+					
+					logger.info("Detected MIME Type: " + mimeType);
+
+					String detectedExtension = "";
+					try {
+						MimeTypes mimeTypes = MimeTypes.getDefaultMimeTypes();
+						MimeType type = mimeTypes.forName(mimeType);
+						detectedExtension = type.getExtension().replace(".", "").toUpperCase();
+					} catch (MimeTypeException e) {
+						logger.error("Could not resolve MIME type to extension", e);
+						validationMessage= fileNameArray[1] + " UNKNOWN FILE TYPE";
+						fileValidation.setValidationMessage(validationMessage);
+						return fileValidation;
+					}
+					logger.info("Detected Extension: " + detectedExtension);
+
+					List<String> allowedList=Arrays.asList(fileParameterBean.getExtension().split(","));
+					logger.info("allowedList " + allowedList);
+					if (!allowedList.contains(detectedExtension)) {
+						validationMessage= fileNameArray[1] + " EXTENSION AND FILE TYPE DON'T MATCH";
+						fileValidation.setValidationMessage(validationMessage);
+						return fileValidation;
+					}
+					long fileSizeInKb=fileSize/1024;
+					logger.info("fileSizeInKb : "+fileSizeInKb);
+
+					if(fileSizeInKb>fileParameterBean.getFileSize()) {
+						validationMessage= documentType+" FILE SIZE EXCEEDS";
+						fileValidation.setValidationMessage(validationMessage);
+						return fileValidation;
+					}
+
+					if("POA".equalsIgnoreCase(documentType)) {
+						if(fileNameArray.length<4) {
+							logger.info("WRONG_NAMING_OF_POA");
+							validationMessage= "WRONG_NAMING_OF_POA";
+							fileValidation.setValidationMessage(validationMessage);
+							return fileValidation;
+						}
+						POA++;
+
+					}else if("POI".equalsIgnoreCase(documentType)){
+						if(fileNameArray.length<4) {
+							logger.info("WRONG_NAMING_OF_POI");
+							validationMessage= "WRONG_NAMING_OF_POI";
+							fileValidation.setValidationMessage(validationMessage);
+							return fileValidation;
+						}
+						POI++;
+
+					}else if("KYC".equalsIgnoreCase(documentType)){
+						if(fileNameArray.length<4) {
+							logger.info("WRONG_NAMING_OF_KYC");
+							validationMessage= "WRONG_NAMING_OF_KYC";
+							fileValidation.setValidationMessage(validationMessage);
+							return fileValidation;
+						}
+						KYC++;
+
+					}else if("Photo".equalsIgnoreCase(documentType)){
+						if(fileNameArray.length!=2) {
+							logger.info("WRONG_NAMING_OF_Photo");
+							validationMessage= "WRONG_NAMING_OF_Photo";
+							fileValidation.setValidationMessage(validationMessage);
+							return fileValidation;
+						}
+						photo++;
+
+					}else if("Sign".equalsIgnoreCase(documentType)){
+						if(fileNameArray.length!=2) {
+							logger.info("WRONG_NAMING_OF_SIGN");
+							validationMessage= "WRONG_NAMING_OF_SIGN";
+							fileValidation.setValidationMessage(validationMessage);
+							return fileValidation;
+						}
+						sign++;
+					}else if ("Others".equalsIgnoreCase(documentType)) {//00000088256675296_Others_PAN.pdf
+					
+						// Start of CR 26060165
+						int length_of_file_name = fileNameArray.length;
+						logger.info("Document Naming Size : " + length_of_file_name);
+						
+						String docPart = fileNameArray[2];
+						logger.info("docPart " + docPart);
+						boolean isPan = "PAN".equalsIgnoreCase(docPart.split("\\.")[0]);
+						logger.info("isPan " + isPan);
+						// End of CR 26060165
+						
+						//if (fileNameArray.length < 3) {
+						if (fileNameArray.length < 2) {
+							logger.info("WRONG_NAMING_OF_Others");
+							validationMessage = "WRONG_NAMING_OF_Others";
+							fileValidation.setValidationMessage(validationMessage);
+							return fileValidation;
+						// Start of CR 26060165
+						}else if (fileNameArray.length > 3 && isPan) {
+							logger.info("WRONG_NAMING_OF_Others PAN");
+							validationMessage = "WRONG_NAMING_OF_Others PAN";
+							fileValidation.setValidationMessage(validationMessage);
+							return fileValidation;
+						// End of CR 26060165
+						}
+						// Start of CR 26060165
+						
+						String countOfOthers=docPart.split("\\.")[0];
+						logger.info("count Of Others "+countOfOthers);
+						boolean isAllowedNumber = "1".equals(countOfOthers) || "2".equals(countOfOthers) || "3".equals(countOfOthers) || "4".equals(countOfOthers);
+						logger.info("count Of Others is allowed ? : "+countOfOthers);
+						
+						//if ( isPan ||  !isAllowedNumber) {
+						if ( !isPan &&  !isAllowedNumber) {
+							logger.info("WRONG_NAMING_OF_Others");
+							validationMessage = "WRONG_NAMING_OF_Others";
+							fileValidation.setValidationMessage(validationMessage);
+							return fileValidation;
+						}
+						// End of CR 26060165
+						Others++;
+
+					}else if("KycUpdateForm".equalsIgnoreCase(documentType)){//cif_kyc_date
+						String kycDate="";
+						logger.info("fileNameArray "+fileNameArray.length);
+						if(fileNameArray.length==3) {
+							kycDate=fileNameArray[fileNameArray.length-1];  //20052026.pdf
+							logger.info("kycDate "+kycDate);
+							String[] ar=kycDate.split("\\.");
+							logger.info(">> "+ar.length);
+							String splitKycDate=ar[0];
+							logger.info("kycDate : "+splitKycDate);
+							if(splitKycDate.length()>0) {
+								try {
+									DateTimeFormatter dtf = DateTimeFormatter.ofPattern("ddMMyyyy");
+									LocalDate receivedkycDate = LocalDate.parse(splitKycDate, dtf);
+									logger.info("receivedkycDate : "+receivedkycDate);
+									fileValidation.setLcpcKycUpdatedate(splitKycDate);
+									//fetchKycdate
+									//String existingKycDate=enquiryDAO.fetchExistingKycDate(Cifnumber);
+									
+									String existingKycDate = enquiryDAO.fetchExistingKycDate(Cifnumber);
+									logger.info("existingKycDate : "+existingKycDate);
+									
+									if(existingKycDate!=null) {
+										DateTimeFormatter edtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+										LocalDateTime dateTime = LocalDateTime.parse(existingKycDate, edtf);
+										LocalDate existingKycLocalDate = dateTime.toLocalDate();
+										logger.info("existingKycDate : "+existingKycLocalDate);
+										if(isReceivedDateIsOld(existingKycLocalDate,receivedkycDate)) {//equals and stored date is 
+											fileValidation.setValidationMessage(LcpcResponses.DuplicateRekyc);
+											return fileValidation;
+										}
+										enquiryDAO.putKycDateToPoc(existingKycLocalDate,Cifnumber);
+									}else {
+										enquiryDAO.putKycDateToPoc(receivedkycDate,Cifnumber);
+									}
+									
+								}catch(Exception e) {
+									logger.info("Exception ex : "+e.getMessage());
+									// Start of CR 26060165
+									//fileValidation.setLcpcKycUpdatedate("");
+									validationMessage= "WRONG_NAMING_OF_KycUpdateForm";
+									fileValidation.setValidationMessage(validationMessage);
+									return fileValidation;
+									// End of CR 26060165
+								}
+							}
+						}else if(fileNameArray.length<2||fileNameArray.length>3) {
+							logger.info("WRONG_NAMING_OF_KycUpdateForm");
+							validationMessage= "WRONG_NAMING_OF_KycUpdateForm";
+							fileValidation.setValidationMessage(validationMessage);
+							return fileValidation;
+						}
+						kycupdateForm++;
+					}else {
+						logger.info("WRONG_NAMING_OF_DOCUMENTS "+fileName);
+						validationMessage= "WRONG_NAMING_OF_DOCUMENTS";
+						fileValidation.setValidationMessage(validationMessage);
+						return fileValidation;
+					}
+				}else {
+					logger.info("WRONG_NAMING_OF_DOCUMENTS "+fileName);
+					validationMessage= "WRONG_NAMING_OF_DOCUMENTS";
+					fileValidation.setValidationMessage(validationMessage);
+					return fileValidation;
+				} 
+			}
+			
+
+			logger.info("POA :" + POA+ "   POI : " + POI+ "   KYC : " + KYC + "   Others : " + Others+ "   kycupdateForm : " + kycupdateForm+ "   photo : " + photo+ "   sign : " + sign);
+
+			if(POA>4||POI>4||KYC>4||Others>4||kycupdateForm>1||photo>1||sign>1) {
+				validationMessage= "INVALID NUMBER OF KYC DOCS";
+				fileValidation.setValidationMessage(validationMessage);
+				return fileValidation;
+			}
+
+
+			//UAT_fix	
+			// Start of CR 26060165
+			if(kycupdateForm<1||photo<1) {
+			//if (((POA<1||POI<1)&&KYC<1)||kycupdateForm<1 || photo<1) {
+			// End of CR 26060165
+				validationMessage= "MANDATORY DOCS NOT PRESENT";
+				fileValidation.setValidationMessage(validationMessage);
+				return fileValidation;
+			// Start of CR 26060165
+			}else if(KYC<1){
+				logger.info("No Kyc document, Checking POA and POI");
+				if(POA<1||POI<1) {
+					validationMessage= "MANDATORY DOCS NOT PRESENT";
+					fileValidation.setValidationMessage(validationMessage);
+					return fileValidation;
+				}
+				logger.info("Find all documents");
+			// End of CR 26060165
+			}
+			validationMessage= "SUCCESS";
+			fileValidation.setValidationMessage(validationMessage);
+			fileValidation.setNoOfKYC(KYC);
+			fileValidation.setNoOfKycUpdateForm(kycupdateForm);
+			fileValidation.setNoOfPOA(POA);
+			fileValidation.setNoOfPOI(POI);
+			return fileValidation;
+		}catch(Exception e) {
+		// Start of CR 26060165
+			logger.error("Error message from validation" , e);
+		// End of CR 26060165
+		}
+		return fileValidation;
+	}
+	
+	private static boolean isReceivedDateIsOld(LocalDate existingKycLocalDate, LocalDate receivedkycDate) {
+		if(existingKycLocalDate.equals(receivedkycDate))
+			return true;
+		else if(existingKycLocalDate.isAfter(receivedkycDate))//15 june is after 01 june
+			return true;
+		else
+			return false;
+	}
+
+	private static boolean validateExtension(String extension, String fileName) {
+	    logger.info("extension " + extension);
+	    String[] extnArray = extension.split(",");
+	    logger.info("No of extensions allowed for the document " + fileName + " is " + extnArray.length);
+	    
+	    String fileNameLower = fileName.toLowerCase();
+	    
+	    for (String extn : extnArray) {
+	        if (fileNameLower.endsWith("." + extn.trim().toLowerCase())) {
+	            return true;
+	        }
+	    }
+	    return false;
+	}
+	
+//Start of CR 26060165
+	private static boolean verifyDocIdNumber(String idString) {		
+		logger.info("idString  : " + idString);
+		String idNo=idString.split("\\.")[0];
+		
+		return listofIds.stream().anyMatch(a->a.equals(idNo));
+	}
+//End of CR 26060165
+
+}
