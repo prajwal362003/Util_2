@@ -1,0 +1,318 @@
+ package com.sbi.serviceImpl;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.Calendar;
+import java.util.List;
+import java.util.Map;
+
+import javax.swing.filechooser.FileNameExtensionFilter;
+
+import org.apache.commons.io.file.SimplePathVisitor;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.Logger;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+import com.sbi.configuration.ExtractProperties;
+import com.sbi.constants.FilePaths;
+import com.sbi.constants.LcpcResponses;
+import com.sbi.dao.EnquiryDAO;
+import com.sbi.dto.CustomerDetails;
+import com.sbi.dto.FileParameters;
+import com.sbi.dto.FileValidationData;
+import com.sbi.service.FileService;
+import com.sbi.service.ZipValidationService;
+import com.sbi.utils.DocLogger;
+import com.sbi.utils.FolderMove;
+
+import net.lingala.zip4j.ZipFile;
+import net.lingala.zip4j.exception.ZipException;
+import net.lingala.zip4j.model.FileHeader;
+
+@Service
+public class ZipValidationServiceImpl implements ZipValidationService {
+	private static final Logger logger = (Logger) LogManager.getLogger(ZipValidationServiceImpl.class);
+
+	@Autowired
+	private EnquiryDAO enquiryDAO;
+
+	@Autowired
+	private FileService fileService;
+
+	public static boolean checkAlpha(String input) {
+		for (int i = 0; i < input.length(); i++) { 
+			if (input.charAt(i) < '0' || input.charAt(i) > '9') { 
+				return false; 
+			} 
+		} 			
+		return true;		
+	}
+
+	@Override
+	public String extractZipFile(File LotFolder, String lcpcname) {
+		String destPath = FilePaths.InputProcessFolder + "/" + lcpcname;
+		logger.info(destPath);
+		File LCPCFold = new File(destPath);
+
+		String FoldList1[] = LCPCFold.list();
+		logger.info("No of folders  : "+FoldList1.length);
+
+		if (FoldList1.length == 0) 
+			logger.info("No Customer Folders found");
+
+		for (String extFile : FoldList1) {
+			logger.info("Extracted folder   : "+extFile);
+			try{
+				FolderMove.moveFolder(Paths.get(FilePaths.InputProcessFolder,lcpcname,extFile), Paths.get(FilePaths.ExceptionFolder,lcpcname,extFile));
+			}catch(Exception e) {
+				logger.error("caught an exception while pushing  "+extFile+" folder from "+Paths.get(FilePaths.InputProcessFolder,lcpcname,extFile)+" path  >>> "+e.getMessage());
+			}
+		}
+		logger.info("cleaned Folder before extracting a new lot");
+
+		File child = new File(LotFolder.getAbsolutePath());
+
+		logger.info("File pulled : " + child.getAbsolutePath());
+		final FileNameExtensionFilter extensionFilter = new FileNameExtensionFilter("N/A", "zip");
+
+		String[] parts = LotFolder.getName().split("_");
+
+		String[] date1 = parts[5].split("\\.");
+		logger.info("Part [4] ::: " + date1[0]);
+
+		long varLong = Long.parseLong(date1[0]);
+		logger.info("varLong ::: " + varLong);
+
+		String month = parts[2].substring(3, 4);
+		Calendar c = Calendar.getInstance();
+		int week = c.get(Calendar.WEEK_OF_MONTH);
+		String passwd = "Password@" + month + week;
+
+		try (ZipFile zipFile = new ZipFile(child)) {
+			if (extensionFilter.accept(child)) {
+
+				if (zipFile.isEncrypted()) {
+					zipFile.setPassword(passwd.toCharArray());
+				}
+				List<FileHeader> fileHeaderList = zipFile.getFileHeaders();
+				int count=0;
+				for(FileHeader header : fileHeaderList) {
+					logger.info("extracting ... "+header.getFileName() );	
+					zipFile.extractFile(header, destPath);
+					count++;
+				}
+				logger.info("Extracted number of folders from ::: "+zipFile+" is   "+count );	
+			}
+		} catch (ZipException ze) {
+			logger.error("Before if Exception ::: " + ze.getLocalizedMessage());
+			if (ze.getLocalizedMessage().contains("Wrong password?")) {
+				logger.error("ZIpException ::: Wrong password in property");
+				try {
+					logger.error("<<<<<<<<<<<<<<<<<< Exception generation  >>>>>>>>>>>>>>");
+					// copyFile(child, "EXCEPTION", env);
+					logger.error("zip to be deleted {}" + LotFolder.getAbsolutePath());
+					File filetoDelete = new File(LotFolder.getAbsolutePath());
+					filetoDelete.delete();
+					logger.error("zip deleted {}" + filetoDelete.getAbsolutePath());
+
+				}catch (Exception e) {
+					logger.error(
+							"Exception in exception file generation Exception message and cause is" + e.getMessage());
+				}
+			}
+			System.out.println("Exception ::: " + ze.getLocalizedMessage());
+		} catch (IOException e) {
+			System.out.println("Exception ::: " + e.getLocalizedMessage());
+			logger.error("Exception ",e);
+		} 
+
+		logger.info("moving to bkp "+child.getName());	
+		boolean res = Filemove(LotFolder, FilePaths.ZipBackupfolder, lcpcname);
+		logger.info("res ::: " +res);	
+		if (!res) {
+			logger.info("file not moved");
+			return "MOVE FAIL";
+		}
+		return "SUCCESS";
+	}
+
+
+	public static boolean Filemove(File LotFolder, String ParentFld, String lcpcname) {
+		try {
+			logger.info("moving files for " + LotFolder);
+			File Fold = new File(ParentFld + File.separator + lcpcname + File.separator + LotFolder.getName());
+			logger.info("moving files to FOLDERPATH " + ParentFld + File.separator + lcpcname + File.separator+ LotFolder.getName());
+			logger.info("moving files to ABSOLUTE PATH " + Fold.getAbsolutePath());
+			Files.move(LotFolder.toPath(), Fold.toPath(), StandardCopyOption.REPLACE_EXISTING);
+			logger.info("movED files ");
+		} catch (Exception e) {
+			logger.info(e.getLocalizedMessage());
+			return false;
+		}
+		return true;
+	}
+
+
+	@Override
+	public void iterateFolders(File LotFolder, String lcpcname) {
+
+		String destPath = FilePaths.InputProcessFolder + "/" + lcpcname;
+		logger.info("destPath  : "+destPath);
+
+		File LCPCFold = new File(destPath);
+		String FoldList[] = LCPCFold.list();
+		logger.info("No of folders  : "+FoldList.length);
+
+		Map<String,FileParameters> criteriaMap = enquiryDAO.fetchValidations();
+		logger.info("validation criteriaMap : "+criteriaMap);
+
+		for (String extFile : FoldList) {
+			logger.info("Extracted folder   : "+extFile);
+			CustomerDetails customerDetails = new CustomerDetails();
+			customerDetails.setZipFile(LotFolder.getName());
+			customerDetails.setLcpc(lcpcname);
+			//	String errorMsg="";
+			boolean validationFlag=false;
+			String cif = "";
+			String Acc = "";
+			String branch = "";
+			String filename[] = null;
+			if (extFile.contains("_")) {
+				filename = extFile.split("\\_");
+				if (!(filename.length == 3)) {
+					customerDetails.setRemark(LcpcResponses.invalidFolderName);
+					generateresponse(validationFlag,LotFolder,lcpcname,extFile,customerDetails);
+					continue;
+				}
+			} else {
+				//errorMsg=LcpcResponses.invalidFolderName;
+				customerDetails.setRemark(LcpcResponses.invalidFolderName);
+				generateresponse(validationFlag,LotFolder,lcpcname,extFile,customerDetails);
+				continue;
+			}
+			cif = extFile.split("\\_")[0];
+			branch = extFile.split("\\_")[1];
+			Acc = extFile.split("\\_")[2];
+
+			customerDetails.setCif(cif);
+			customerDetails.setAccountNumber(Acc);
+			customerDetails.setBranchCode(branch);
+
+			logger.info("\n CIF : "+cif +"\n Branch "+branch+"\n AccountNumber : "+Acc);
+
+			if (!(cif.length() == 17 && branch.length() == 5 && Acc.length() == 17)) {
+				customerDetails.setRemark(LcpcResponses.invalidFolderParameters);//errorMsg=LcpcResponses.invalidFolderParameters;
+				generateresponse(validationFlag,LotFolder,lcpcname,extFile,customerDetails);
+				continue;
+			}
+
+			if ((checkAlpha(branch) == false) || (checkAlpha(cif) == false)|| (checkAlpha(Acc) == false)) {
+				customerDetails.setRemark(LcpcResponses.invalidFolderParameters);//errorMsg=LcpcResponses.invalidFolderParameters;
+				generateresponse(validationFlag,LotFolder,lcpcname,extFile,customerDetails);
+				continue;
+			}
+
+			boolean cifPresent=enquiryDAO.checkIfCifPresent(cif);
+			logger.info("cifPresent :  "+cifPresent);
+			if(!cifPresent) {
+				customerDetails.setRemark(LcpcResponses.cif_not_found);//errorMsg=LcpcResponses.cif_not_found;
+				//generateresponse(validationFlag,LotFolder,lcpcname,extFile,customerDetails);
+				generateCifNotFoundresponse(validationFlag,LotFolder,lcpcname,extFile,customerDetails);
+				continue;
+			}
+
+			File ExtractedFold = new File(destPath + "/" + extFile);
+			FileValidationData fileValidation = null;
+			try {
+				fileValidation = fileService.fileValidations(ExtractedFold, lcpcname, cif, Acc, criteriaMap);
+			} catch (Exception e) {
+				logger.error("IOException :  ",e);
+				e.printStackTrace();
+			}
+			logger.info("validationMsg :  "+fileValidation.getValidationMessage());
+
+			if(!"SUCCESS".equalsIgnoreCase(fileValidation.getValidationMessage())) {
+				customerDetails.setRemark(fileValidation.getValidationMessage());//errorMsg=fileValidation.getValidationMessage();
+				generateresponse(validationFlag,LotFolder,lcpcname,extFile,customerDetails);
+				continue;
+			}
+
+			boolean cifStatus = enquiryDAO.checkStatusForCif(cif);
+			logger.info("cifStatus is allowd ? :  "+cifStatus);
+			if(!cifStatus) {
+				customerDetails.setRemark(LcpcResponses.cif_under_process);//errorMsg=LcpcResponses.cif_under_process;
+				generateresponse(validationFlag,LotFolder,lcpcname,extFile,customerDetails);
+				continue;
+			}
+			generateresponse(true,LotFolder,lcpcname,extFile,customerDetails);
+			logger.info("Iterated for the CIF "+customerDetails.getCif()+"\n");
+			logger.info("_____________________________________________________________________________________________________________________________________________________________________________");
+		}
+		// Log the folders that are not getting deleted
+
+		String FoldList1[] = LCPCFold.list();
+		logger.info("No of folders  : "+FoldList.length);
+
+		if (FoldList1.length == 0) 
+			logger.info("No Customer Folders found");
+
+		for (String extFile : FoldList1) {
+			logger.info("Extracted folder   : "+extFile);
+			FolderMove.moveFolder(Paths.get(FilePaths.InputProcessFolder,lcpcname,extFile), Paths.get(FilePaths.ExceptionFolder,lcpcname,extFile));
+		}
+		logger.info("_____________________________ All folders Iteration done for the current LOT ___________________________________");
+	}
+
+	private void generateCifNotFoundresponse(boolean validationFlag, File lotFolder, String lcpcname, String extFile,
+			CustomerDetails customerDetails) {
+		logger.info("generateresponse for validationFlag "+validationFlag);
+
+		Path sourcePath = Paths.get(FilePaths.InputProcessFolder,lcpcname,extFile);
+		logger.info("sourcePath " + sourcePath);
+		DocLogger.docWriter(lotFolder.getName(), customerDetails.getRemark(), extFile, lcpcname);
+		
+		Path destPath = Paths.get(FilePaths.ExceptionFolder,lcpcname,extFile);
+		logger.info("destPath " + destPath);
+
+		FolderMove.moveFolder(sourcePath, destPath);
+		enquiryDAO.insertHistory(customerDetails);
+	}
+
+	public void generateresponse( boolean validationFlag, File zipLotFile, String lcpcname, String extFile, CustomerDetails customerDetails) {
+		logger.info("generateresponse for validationFlag "+validationFlag);
+
+		Path destPath=null;
+
+		Path sourcePath = Paths.get(FilePaths.InputProcessFolder,lcpcname,extFile);
+		logger.info("sourcePath " + sourcePath);
+
+		if(validationFlag) {
+			customerDetails.setRemark("Documents Validated Succesfully");
+			DocLogger.docWriterSu(zipLotFile.getName(), customerDetails.getRemark(), extFile, lcpcname);
+			destPath = Paths.get(FilePaths.OutputPath,lcpcname,extFile);
+			customerDetails.setStatus("CP");
+			enquiryDAO.updateStatus(customerDetails);
+		}else {
+			DocLogger.docWriter(zipLotFile.getName(), customerDetails.getRemark(), extFile, lcpcname);
+			destPath = Paths.get(FilePaths.ExceptionFolder,lcpcname,extFile);
+			customerDetails.setStatus("");
+			// Start of CR 26060165
+			enquiryDAO.updateStatusForRejection(customerDetails);
+			// End of CR 26060165
+		}
+		logger.info("destPath " + destPath);
+
+		FolderMove.moveFolder(sourcePath, destPath);
+		enquiryDAO.insertHistory(customerDetails);
+	}
+
+}
