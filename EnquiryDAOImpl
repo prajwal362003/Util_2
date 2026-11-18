@@ -1,0 +1,213 @@
+package com.sbi.daoImpl;
+
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.time.LocalDate;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import org.springframework.dao.EmptyResultDataAccessException;
+import org.springframework.jdbc.core.BeanPropertyRowMapper;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.ResultSetExtractor;
+import org.springframework.stereotype.Repository;
+
+import com.sbi.configuration.DataBaseConfiguration;
+import com.sbi.configuration.ExtractProperties;
+import com.sbi.configuration.ServerConfiguration;
+import com.sbi.dao.EnquiryDAO;
+import com.sbi.dto.CustomerDetails;
+import com.sbi.dto.FileParameters;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.Logger;
+
+@Repository
+public class EnquiryDAOImpl implements EnquiryDAO {
+
+	private static final Logger logger = (Logger) LogManager.getLogger(EnquiryDAOImpl.class);
+	private static final JdbcTemplate jdbcTemplate = new JdbcTemplate(DataBaseConfiguration.getDataSource());
+	
+	private static String hostName = ServerConfiguration.getCachedHostname();
+	
+	String ckycStatusSet=ExtractProperties.getInstance().getProperty("Ckyc.customer.status");
+	String kycStatusSet=ExtractProperties.getInstance().getProperty("kyc.customer.status");
+	
+	@Override
+	public boolean checkIfCifPresent(String cif) {
+		try {
+			String sql = "select 1 from kyc_Perfios_customer_details where cif_number = ?";
+			Integer result = jdbcTemplate.queryForObject(sql, Integer.class, cif);
+			return (result != null && result == 1);
+		}catch(EmptyResultDataAccessException e) {
+			logger.error("Cif not found   "+e.getMessage());
+		}catch(Exception e) {
+			logger.error("Exception  "+e.getLocalizedMessage());
+			logger.error("Exception  ", e);
+		}
+		return false;
+	}
+	
+	
+	@Override
+	public String fetchExistingKycDate(String cifnumber) {
+		String fetchKycDatesql = "select kyc_update_date from kyc_perfios_customer_details where cif_number = '"+cifnumber+"'";
+		logger.info("dateString  :  "+fetchKycDatesql);
+		try {
+			return jdbcTemplate.queryForObject(fetchKycDatesql, String.class);
+		}
+		catch(Exception e) {
+			logger.error("No KYC date found for CIF" + e.getMessage());
+			return null;
+		}
+	}
+
+	@Override
+	public boolean checkStatusForCif(String cif) {
+		String status="";
+
+		String ckycCustomerQuery="select status from ckyc.ckyc_customer_details where cif_number ='"+ cif + "' "; //null/IP/SB/USB/S/SS/ASB/AUSB
+		logger.info("ckycCustomerQuery : "+ckycCustomerQuery);
+		try {
+			if(jdbcTemplate==null) {
+				logger.info("jdbcTemplate is null");
+			}
+			status=jdbcTemplate.queryForObject(ckycCustomerQuery, String.class);
+			logger.info("status : "+status);
+		}catch(EmptyResultDataAccessException e) {
+			logger.error("EmptyResult : ",e.getMessage());
+			status="";
+		}catch(Exception e) {
+			logger.error("Exception : ",e);
+			status="";
+		}
+		
+		List<String> ckycStatusList=Arrays.asList(ckycStatusSet.split(","));
+
+		if(status==null||status.isEmpty()||ckycStatusList.contains(status)){
+			
+			List<String> kycStatusList=Arrays.asList(kycStatusSet.split(","));
+
+			String kycCustomerQuery="select status from kycupdate.kyc_customer_details where cif_number ='"+cif+"'";//null/KIP/KSB/KUSB/KS/KSS/S/SS
+			logger.info("kycCustomerQuery : "+kycCustomerQuery);
+			try {
+				status=jdbcTemplate.queryForObject(kycCustomerQuery, String.class);
+				logger.info("status : "+status);
+			}catch(EmptyResultDataAccessException e) {
+				logger.error("EmptyResult : ",e.getMessage());
+				status="";
+			}catch(Exception e) {
+				logger.error("Exception : ",e);;
+			}
+			if(status==null||status.isEmpty()||kycStatusList.contains(status))
+				return true;
+			else  
+				return false;
+		}
+		return false;
+	}
+	
+	@Override
+	public Map<String, FileParameters> fetchValidations(){
+		// Start of CR 26060165
+		//String sql = "SELECT * FROM kyc_perfios_validation";
+		String sql = "SELECT * FROM kycupdate.kyc_perfios_validation";
+		// End of CR 26060165
+		logger.info("query to fetch validations: "+sql);
+		try {
+			Map<String, FileParameters> userMap = jdbcTemplate.query(sql, new ResultSetExtractor<Map<String, FileParameters>>() {
+				@Override
+				public Map<String, FileParameters> extractData(ResultSet rs)  {
+					Map<String, FileParameters> map = new HashMap<>();
+					try {
+						logger.info("resultSet  "+rs);
+
+						while (rs.next()) {
+							BeanPropertyRowMapper<FileParameters> mapper = new BeanPropertyRowMapper<>(FileParameters.class);
+							FileParameters bean = mapper.mapRow(rs, rs.getRow());
+							logger.info("FileParameters :  "+bean.toString());
+							map.put(bean.getFileType(), bean);
+						}
+					} catch (SQLException e) {
+						e.printStackTrace();
+					}
+				    return map;
+				}
+			});
+			logger.info("validations fetched  ");
+			return userMap;
+		// Start of CR 26060165
+		}catch(EmptyResultDataAccessException e) {
+			logger.error("EmptyResultDataAccessException : ",e);
+			return Collections.emptyMap();
+		// End of CR 26060165
+		}catch(Exception e) {
+			logger.error("Exception : ",e);
+			return Collections.emptyMap();
+		}
+	}
+
+	@Override
+	public void putKycDateToPoc(LocalDate kycUpdateDate, String cif) {
+		logger.info("updating kycUpdateDate   :  "+kycUpdateDate);
+		String sql = "update kyc_Perfios_customer_details set Kyc_update_date=TO_DATE('"+kycUpdateDate+"','YYYY-MM-DD') where cif_number = '"+cif+"'";
+		logger.info("insert kyc update date sql  :  "+sql);
+		try {
+			int a=jdbcTemplate.update(sql);
+			logger.info("No of rows updated :  "+a);
+		}catch(Exception e) {
+			logger.error("Exception  ",e);
+		}
+	}
+
+	
+	@Override
+	public void updateStatus(CustomerDetails customerDetails) {
+		String statusUpdateSql="Update kyc_perfios_customer_details set cif_status=?,zip_file=?, remark=?, modified_date=sysdate, cif_pulled_date=sysdate where cif_number=?";
+		logger.info("statusUpdateSql   :  "+statusUpdateSql);
+		logger.info("remark of the customer   :  "+customerDetails.getRemark());
+		try {
+			int a=jdbcTemplate.update(statusUpdateSql,customerDetails.getStatus(),customerDetails.getZipFile(),customerDetails.getRemark(),customerDetails.getCif());
+			logger.info("No of rows modified :  "+a);
+		}catch(Exception e) {
+			logger.error("Exception  ",e);
+		}
+	}
+	
+	// Start of CR 26060165
+	@Override
+	public void updateStatusForRejection(CustomerDetails customerDetails) {
+		//String statusUpdateSql="Update kyc_perfios_customer_details set cif_status=?,zip_file=?, remark=?, modified_date=sysdate,Kyc_update_date=null where cif_number=?";
+		
+		String statusUpdateSql="Update kyc_perfios_customer_details set zip_file=?, remark=?, modified_date=sysdate where cif_number=?";
+		logger.info("statusUpdateSql   :  "+statusUpdateSql);
+		logger.info("remark of the customer   :  "+customerDetails.getRemark());
+		try {
+			int a=jdbcTemplate.update(statusUpdateSql,customerDetails.getZipFile(),customerDetails.getRemark(),customerDetails.getCif());
+			logger.info("No of rows inserted :  "+a);
+		}catch(Exception e) {
+			logger.error("Exception  ",e);
+		}
+	}
+	// End of CR 26060165
+
+	@Override
+	public void insertHistory(CustomerDetails customerDetails) {
+		
+		String historyUpdateSql="insert into kyc_perfios_history (cif_number, Account_Number, ckyc_number,branch_code,zip_file,modified_date,remark,server,modified_by)"
+				+ " values (?,?,?,?,?,sysdate,?,?,'Util_2_Documents_Validation')";
+		logger.info("history UpdateSql  :  "+historyUpdateSql);
+		try {
+			int a=jdbcTemplate.update(historyUpdateSql,customerDetails.getCif(),customerDetails.getAccountNumber(),
+					customerDetails.getCkycNumber(),customerDetails.getBranchCode(),customerDetails.getZipFile(),customerDetails.getRemark(),hostName);
+			logger.info("No of rows inserted :  "+a);
+		}catch(Exception e) {
+			logger.error("Exception  ",e);
+		}
+	}
+
+	
+
+}
